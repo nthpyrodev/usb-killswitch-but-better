@@ -3,28 +3,22 @@ from tkinter import messagebox, filedialog, ttk
 import subprocess
 import threading
 import time
-import platform
 import os
 import sys
+import pyudev
 
-usbIdentifier = "K"
 selectedTasks = []
 customCommands = []
 fileToDelete = ""
 processesToKill = []
-monitoring = False
 usbMonitoring = False
-osType = "Linux"
 usbDevices = []
-pauseCounter = 0
 usbPauseCounter = 0
-driveRemoved = False
 usbTimeout = 15
 veracryptTimeout = 30
 shutdownMode = "immediate"
 volumesToDismount = []
-shredPasses = 10
-identifierRemoved = False
+shredPasses = 7
 systemVolumesCache = []
 nonSystemVolumesCache = []
 lastCacheUpdate = 0
@@ -32,17 +26,23 @@ lastCacheUpdate = 0
 def getCurrentUsbDevices():
     devices = []
     try:
-        result = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            devices = result.stdout.splitlines()
+        context = pyudev.Context()
+        for device in context.list_devices(subsystem='block', DEVTYPE='disk'):
+            if device.get('ID_BUS') == 'usb':
+                devices.append(f"USB_DISK:{device.device_node}")
         
-        result = subprocess.run(["mount"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if any(pattern in line for pattern in ["/dev/sd", "/dev/usb", "/media", "/mnt"]):
-                    devices.append(line)
-    except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
-        logMessage(f"Error getting USB devices: {str(e)}")
+        for device in context.list_devices(subsystem='usb', DEVTYPE='usb_device'):
+            devices.append(f"USB_DEV:{device.get('ID_VENDOR_ID', '')}:{device.get('ID_MODEL_ID', '')}")
+    
+    except Exception as e:
+        logMessage(f"Error getting USB devices with pyudev: {str(e)}")
+        try:
+            result = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                devices = result.stdout.splitlines()
+        except:
+            pass
+    
     return devices
 
 def checkUsbChanges():
@@ -57,40 +57,49 @@ def checkUsbChanges():
         logMessage(f"Error checking USB changes: {str(e)}")
         return False
 
-def checkIdentifierUsbPresence():
-    try:
-        possiblePaths = [
-            f"/media/{os.getenv('USER')}/{usbIdentifier}",
-            f"/media/{usbIdentifier}",
-            f"/mnt/{usbIdentifier}",
-            f"/run/media/{os.getenv('USER')}/{usbIdentifier}"
-        ]
-        return any(os.path.ismount(path) for path in possiblePaths)
-    except Exception as e:
-        logMessage(f"Error checking USB identifier presence: {str(e)}")
-        return False
-
 def getMountedUsbVolumes():
     mountedVolumes = []
     try:
-        result = subprocess.run(["mount"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if any(pattern in line for pattern in ["/dev/sd", "/dev/usb", "/media", "/run/media"]):
-                    parts = line.split(" ")
-                    if len(parts) >= 3:
-                        device = parts[0]
-                        mountPoint = parts[2]
-                        mountedVolumes.append((device, mountPoint))
-    except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
-        logMessage(f"Error getting mounted USB volumes: {str(e)}")
+        context = pyudev.Context()
+        
+        for device in context.list_devices(subsystem='block'):
+            if device.get('ID_BUS') == 'usb' and device.get('DEVTYPE') in ['disk', 'partition']:
+                device_node = device.device_node
+                if device_node:
+                    try:
+                        with open('/proc/mounts', 'r') as f:
+                            for line in f:
+                                if line.startswith(device_node):
+                                    parts = line.split()
+                                    if len(parts) >= 2:
+                                        mount_point = parts[1]
+                                        mountedVolumes.append((device_node, mount_point))
+                                    break
+                    except:
+                        continue
+    
+    except Exception as e:
+        logMessage(f"Error getting mounted USB volumes with pyudev: {str(e)}")
+        try:
+            result = subprocess.run(["mount"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if any(pattern in line for pattern in ["/dev/sd", "/dev/usb", "/media", "/run/media"]):
+                        parts = line.split(" ")
+                        if len(parts) >= 3:
+                            device = parts[0]
+                            mountPoint = parts[2]
+                            mountedVolumes.append((device, mountPoint))
+        except:
+            pass
+    
     return mountedVolumes
 
 def isSystemVolume(device, mountPoint):
     global systemVolumesCache, nonSystemVolumesCache, lastCacheUpdate
     
     cacheAge = time.time() - lastCacheUpdate
-    if cacheAge < 60:  # Cache valid for 60 seconds, I should reconsider this
+    if cacheAge < 60: # Cache valid for 60 seconds, I should reconsider this
         if device in systemVolumesCache or mountPoint in systemVolumesCache:
             return True
         if device in nonSystemVolumesCache and mountPoint in nonSystemVolumesCache:
@@ -103,7 +112,6 @@ def isSystemVolume(device, mountPoint):
         lastCacheUpdate = time.time()
         return True
     
-    # Check if it's listed in fstab (permanent mounts)
     try:
         fstabResult = subprocess.run(["grep", device, "/etc/fstab"], 
                                      capture_output=True, text=True, timeout=5)
@@ -130,7 +138,6 @@ def isSystemVolume(device, mountPoint):
     except:
         pass
     
-    # If uncertain, assume it's a system volume. Maybe I should take the opposite approach.
     systemVolumesCache.append(device)
     systemVolumesCache.append(mountPoint)
     lastCacheUpdate = time.time()
@@ -336,44 +343,12 @@ def turnOffScreen():
 
 def lockComputer():
     logMessage("Locking computer...")
-    desktopEnv = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
-    
-    lockCommands = {
-        'gnome': ["gnome-screensaver-command -l", "dbus-send --type=method_call --dest=org.gnome.ScreenSaver /org/gnome/ScreenSaver org.gnome.ScreenSaver.Lock"],
-        'kde': ["loginctl lock-session"],
-        'xfce': ["xflock4"],
-        'cinnamon': ["cinnamon-screensaver-command -l"],
-        'mate': ["mate-screensaver-command -l"],
-        'lxde': ["lxlock"],
-        'i3': ["i3lock"],
-        'sway': ["swaylock"],
-        'unity': ["gnome-screensaver-command -l"]
-    }
-    
-    if desktopEnv in lockCommands:
-        for cmd in lockCommands[desktopEnv]:
-            try:
-                subprocess.run(cmd, shell=True, timeout=5)
-                logMessage(f"Screen locked using: {cmd}")
-                return
-            except:
-                continue
-    
-    genericCommands = [
-        "xdg-screensaver lock",
-        "loginctl lock-session",
-        "light-locker-command -l"
-    ]
-    
-    for cmd in genericCommands:
-        try:
-            subprocess.run(cmd, shell=True, timeout=5)
-            logMessage(f"Screen locked using generic method: {cmd}")
-            return
-        except:
-            continue
-            
-    logMessage("Failed to lock screen after trying all methods")
+    try:
+        subprocess.run("loginctl lock-session", shell=True, timeout=5)
+        logMessage("Screen locked")
+    except Exception as e:
+        logMessage(f"Failed to lock screen: {str(e)}")
+
 
 def runCustomCommands():
     for command in customCommands:
@@ -399,38 +374,13 @@ def runCustomCommands():
         except Exception as e:
             logMessage(f"Error executing command '{command}': {str(e)}")
 
-def monitorUsbIdentifier():
-    global monitoring, identifierRemoved
-    
-    while monitoring:
-        try:
-            if not identifierRemoved and not checkIdentifierUsbPresence():
-                logMessage(f"{usbIdentifier} identifier USB drive removed. Executing tasks...")
-                identifierRemoved = True
-                executeTasks()
-        except Exception as e:
-            logMessage(f"Error in USB identifier monitoring: {str(e)}")
-        time.sleep(1)
-
-def onUsbChange():
-    global usbMonitoring
-    
-    while usbMonitoring:
-        try:
-            if checkUsbChanges():
-                logMessage("USB device change detected. Executing tasks...")
-                executeTasks()
-        except Exception as e:
-            logMessage(f"Error in USB change monitoring: {str(e)}")
-        time.sleep(1)
-
 def executeTasks():
-    global monitoring, usbMonitoring
+    global usbMonitoring
     
     shutdownRequired = "Shutdown" in selectedTasks
     
     for task in selectedTasks:
-        if not monitoring and not usbMonitoring:
+        if not usbMonitoring:
             logMessage("Monitoring stopped. Aborting remaining tasks.")
             return
             
@@ -460,35 +410,36 @@ def executeTasks():
     if shutdownRequired:
         shutdownSystem()
 
-def startMonitoring():
-    global monitoring, identifierRemoved, monitorThread
-    
-    identifierRemoved = False
-    monitoring = True
-    monitorThread = threading.Thread(target=monitorUsbIdentifier)
-    monitorThread.daemon = True
-    monitorThread.start()
-
 def startUsbMonitoring():
-    global usbMonitoring, usbDevices, usbMonitorThread
+    global usbMonitoring, usbMonitorThread
     
-    usbDevices = getCurrentUsbDevices()
+    def monitor_usb_events():
+        try:
+            context = pyudev.Context()
+            monitor = pyudev.Monitor.from_netlink(context)
+            monitor.filter_by(subsystem='usb')
+            monitor.filter_by(subsystem='block')
+            monitor.start()
+            
+            for device in iter(monitor.poll, None):
+                if not usbMonitoring:
+                    break
+                    
+                if device.action in ['add', 'remove']:
+                    if (device.subsystem == 'block' and device.get('ID_BUS') == 'usb') or \
+                       (device.subsystem == 'usb' and device.device_type == 'usb_device'):
+                        logMessage(f"USB device {device.action}: {device.device_node or device.sys_name}")
+                        executeTasks()
+                        break
+        except Exception as e:
+            logMessage(f"Error in pyudev USB monitoring: {str(e)}")
+    
     usbMonitoring = True
-    usbMonitorThread = threading.Thread(target=onUsbChange)
+    usbMonitorThread = threading.Thread(target=monitor_usb_events)
     usbMonitorThread.daemon = True
     usbMonitorThread.start()
     
     updateVolumeCache()
-
-def togglePause():
-    global pauseCounter, monitoring
-    
-    pauseCounter += 1
-    if pauseCounter == 5:
-        pauseCounter = 0
-        monitoring = False
-        startButton.config(state=tk.NORMAL)
-        pauseButton.config(state=tk.DISABLED)
 
 def toggleUsbPause():
     global usbPauseCounter, usbMonitoring
@@ -499,71 +450,6 @@ def toggleUsbPause():
         usbMonitoring = False
         usbStartButton.config(state=tk.NORMAL)
         usbPauseButton.config(state=tk.DISABLED)
-
-def onStartButtonClick():
-    global selectedTasks, customCommands, fileToDelete, processesToKill
-    global veracryptTimeout, usbTimeout, shredPasses, shutdownMode, volumesToDismount
-    
-    selectedTasks = [task.get() for task in tasks if task.get()]
-    if not selectedTasks:
-        messagebox.showerror("Error", "Please select at least one task")
-        return
-    
-    customCommands = []
-    for commandEntry in commandEntries:
-        if commandEntry.get().strip():
-            customCommands.append(commandEntry.get().strip())
-    
-    processesToKill = []
-    for processEntry in processEntries:
-        if processEntry.get().strip():
-            processesToKill.append(processEntry.get().strip())
-    
-    fileToDelete = fileEntry.get()
-    
-    try:
-        veracryptTimeoutValue = int(veracryptTimeoutEntry.get())
-        if veracryptTimeoutValue > 0:
-            veracryptTimeout = veracryptTimeoutValue
-    except ValueError:
-        pass
-    
-    try:
-        usbTimeoutValue = int(usbTimeoutEntry.get())
-        if usbTimeoutValue > 0:
-            usbTimeout = usbTimeoutValue
-    except ValueError:
-        pass
-    
-    try:
-        shredPassesValue = int(shredPassesEntry.get())
-        if shredPassesValue > 0:
-            shredPasses = shredPassesValue
-    except ValueError:
-        pass
-    
-    shutdownMode = shutdownModeVar.get()
-    
-    volumesToDismount = volumesEntry.get().split(";")
-    volumesToDismount = [vol.strip() for vol in volumesToDismount if vol.strip()]
-    
-    if monitoring:
-        statusLabel.config(text="Monitoring started...")
-    else:
-        startMonitoring()
-        pauseButton.config(state=tk.NORMAL)
-        startButton.config(state=tk.DISABLED)
-        statusLabel.config(text="Monitoring started...")
-        logMessage(f"{usbIdentifier} identifier monitoring armed and ready.")
-
-def onPauseButtonClick():
-    togglePause()
-    if monitoring:
-        statusLabel.config(text="Monitoring started...")
-    else:
-        statusLabel.config(text="Monitoring paused...")
-        if pauseCounter == 0:
-            logMessage(f"{usbIdentifier} identifier monitoring disarmed.")
 
 def onUsbStartButtonClick():
     global selectedTasks, customCommands, fileToDelete, processesToKill
@@ -720,26 +606,13 @@ def addCommandEntry():
     except Exception as e:
         messagebox.showerror("Error", f"Failed to add command entry: {str(e)}")
 
-def changeUsbIdentifier(event=None):
-    global usbIdentifier
-    
-    try:
-        newIdentifier = usbIdentifierEntry.get().strip()
-        if newIdentifier:
-            usbIdentifier = newIdentifier
-            logMessage(f"USB identifier changed to: {newIdentifier}")
-            startButton.config(text=f"Arm {newIdentifier}-Identifier Monitor")
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to change USB identifier: {str(e)}")
-
 def onTabChanged(event):
     notebook.focus_set()
 
 def createGui():
-    global startButton, pauseButton, statusLabel
     global usbStartButton, usbPauseButton, usbStatusLabel
     global tasks, commandEntries, fileEntry, processEntries
-    global logText, usbIdentifierEntry, veracryptTimeoutEntry, usbTimeoutEntry
+    global logText, veracryptTimeoutEntry, usbTimeoutEntry
     global notebook, processEntriesFrame, commandEntriesFrame
     global shutdownModeVar, volumesEntry, shredPassesEntry
 
@@ -778,14 +651,6 @@ def createGui():
 
         configFrame = ttk.LabelFrame(mainTab, text="Configuration Settings")
         configFrame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        usbIdentifierFrame = ttk.Frame(configFrame)
-        usbIdentifierFrame.pack(fill=tk.X, padx=10, pady=5)
-        ttk.Label(usbIdentifierFrame, text="USB Identifier to Monitor:").pack(side=tk.LEFT)
-        usbIdentifierEntry = ttk.Entry(usbIdentifierFrame, width=10)
-        usbIdentifierEntry.insert(0, "K")
-        usbIdentifierEntry.pack(side=tk.LEFT, padx=5)
-        usbIdentifierEntry.bind("<FocusOut>", changeUsbIdentifier)
         
         timeoutFrame = ttk.Frame(configFrame)
         timeoutFrame.pack(fill=tk.X, padx=10, pady=5)
@@ -929,22 +794,6 @@ def createGui():
         monitorFrame = ttk.Frame(monitoringTab)
         monitorFrame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        identifierMonitorFrame = ttk.LabelFrame(monitorFrame, text="USB Identifier Monitoring")
-        identifierMonitorFrame.pack(fill=tk.X, padx=10, pady=10)
-        
-        identifierButtonFrame = ttk.Frame(identifierMonitorFrame)
-        identifierButtonFrame.pack(fill=tk.X, padx=5, pady=10)
-        
-        startButton = ttk.Button(identifierButtonFrame, text="Arm USB Identifier Monitor", command=onStartButtonClick)
-        startButton.pack(side=tk.LEFT, padx=5)
-        
-        pauseButton = ttk.Button(identifierButtonFrame, text="Disarm (Press 5 Times)", 
-                                  command=onPauseButtonClick, state=tk.DISABLED)
-        pauseButton.pack(side=tk.LEFT, padx=5)
-        
-        statusLabel = ttk.Label(identifierMonitorFrame, text="Status: Not Armed")
-        statusLabel.pack(fill=tk.X, padx=5, pady=5)
-
         usbMonitorFrame = ttk.LabelFrame(monitorFrame, text="USB Change Monitoring")
         usbMonitorFrame.pack(fill=tk.X, padx=10, pady=10)
         
@@ -988,56 +837,51 @@ def createGui():
         docsText = tk.Text(docsFrame, wrap=tk.WORD, height=30, padx=10, pady=10)
         docsText.pack(fill=tk.BOTH, expand=True)
         
-        docsContent = """USB Killswitch Documentation
+        docsContent = """USB Killswitch
 
 OVERVIEW:
-USB Killswitch is a security tool that monitors USB devices and performs configured actions when 
-specific USB events occur, such as a device being removed or any USB device change.
+This tool monitors for any USB device changes (insertion or removal) 
+and automatically executes configured actions. This is useful for those who have their device abruptly seized.
 
-MONITORING MODES:
-1. USB Identifier Monitoring - Triggers actions when a specific USB drive (identified by name) is removed
-2. USB Change Monitoring - Triggers actions when any USB device change is detected
-
-CONFIGURATION OPTIONS:
-
-- USB Identifier: The name of the USB drive to monitor (default: "K")
-- VeraCrypt Timeout: Maximum time (in seconds) to wait for VeraCrypt volumes to dismount
-- USB Dismount Timeout: Maximum time (in seconds) to wait for USB volumes to dismount
-- Shred Overwrites: Number of passes when securely overwriting files
-- Shutdown Options: Choose between immediate or forced shutdown
-- Volumes to Dismount: Specify which volumes to dismount, or leave empty for all non-system USB volumes
-
-AVAILABLE TASKS:
-- Dismount VeraCrypt Volumes: Safely dismounts all VeraCrypt encrypted volumes
-- Dismount USB Volumes: Safely dismounts USB drives
-- End Process: Terminates specified processes
-- Delete File: Deletes specified files
-- Overwrite File: Securely overwrites files using the shred command
-- Turn Off Screen: Turns off the display
-- Lock Computer: Locks the computer screen
-- Shutdown: Shuts down the system (runs last after all other tasks)
-
-FAILSAFES AND EDGE CASES:
-- All operations have timeouts to prevent hanging
-- Each task is handled separately so failure in one won't stop others
-- Multiple methods are tried for screen locking and turning off the display
-- Secure dismounting of volumes with fallback to lazy unmount if needed
-- System volumes are protected from accidental dismounting
-- Custom commands run with timeouts to prevent hanging
+OPTIONS:
+- Dismount VeraCrypt Volumes: Dismount of encrypted containers
+- Dismount USB Volumes: Safely eject USB storage
+- Delete Files: Standard file deletion
+- Overwrite Files: Multi-pass shredding
+- End Processes: Terminate specified applications (by process name)
+- Lock Computer: Lock the desktop session
+- Turn Off Screen: Disable display output
+- Shutdown System: Complete system shutdown (executed last)
+- Custom Commands: Execute arbitrary shell commands with 30-second timeout
 
 REQUIREMENTS:
 - Linux operating system
-- Root privileges for some features (shutdown, some dismount operations)
-- VeraCrypt installed for VeraCrypt volume dismounting
+- Python with tkinter and pyudev
+- Root/sudo privileges for some commands
 
-USAGE TIPS:
-- For maximum security, combine multiple actions
-- Test your configuration before relying on it in critical situations
-- The 5-press disarm feature prevents accidental disarming
-- Custom commands can extend functionality for specific needs
+OPERATIONAL NOTES:
 
-This project is still in development. Please report bugs or contribute at:
-https://github.com/nthpyrodev/usb-killswitch
+Starting Monitoring:
+- Configure actions in the "Configuration" tab
+- Switch to "Monitoring Controls" tab
+- Click "Arm USB Change Monitor"
+- Status shows "USB Monitoring started..."
+
+Stopping Monitoring:
+- Click "Disarm (Press 5 Times)" button 5 times
+- Lowers chance of accidental or forced disarming
+
+But I'm nOt a cRiMiNaL, wHy wOuLd I uSe tHiS tOoL?
+
+First off, this tool was never designed with criminals in mind.
+This question makes little sense. There are many reasons why the average person might use this tool:
+- To protect against attacks such as rubber ducky USBs, O.MG cables, etc.
+- Activists in oppressive countries can use this tool to protect the identities of fellow protestors, even if they get caught and their devices are seized.
+- Or even just to secure sensitive data if your laptop is grabbed from you.
+Just as criminals use encryption, would it be reasonable for me to label you a criminal simply because you use Signal, WhatsApp, or any other end-to-end encrypted messaging app?
+
+
+Project repository: https://github.com/nthpyrodev/usb-killswitch
 """
         docsText.insert(tk.END, docsContent)
         docsText.config(state=tk.DISABLED)
