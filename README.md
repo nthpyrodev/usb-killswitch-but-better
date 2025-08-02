@@ -1,25 +1,18 @@
 
 # USB Kill Switch
 
-This project is designed for whistleblowers/journalists in oppressive regimes. Please keep in mind that the Linux version is not ready, so stick with the Windows version for now. It would be great if anyone could contribute to this project though!
+This tool will execute chosen actions when a change in USB devices is detected.
 
-~~Linux is not fully supported yet.~~ I have completeley pivoted for the nth time. If you're using Windows, then you should consider switching to Linux. While I do plan to carry on with the Windows version, I'm going to be primarily focusing on the Linux version. Keep in mind that some features have not been properly tested, and should not be relied upon. The rest of the readme is outdated, so ignore it for now, until I update it.
+~~Linux is not fully supported yet.~~ I have completeley pivoted for the nth time. If you're using Windows, then you should consider switching to Linux. ~~While I do plan to carry on with the Windows version, I'm going to be primarily focusing on the Linux version.~~ Just use Linux. Keep in mind that some features have not been properly tested, and should not be relied upon. Please test before relying on this tool. The rest of the readme is outdated, so ignore it for now, until I update it.
 
 ## How to run
 
 Prerequisites:
-
 - Python installed
-- These modules installed: `tkinter subprocess threading time platform os sys types` Note that most of these modules should be there by default
-- Admin access to the computer
+- Sudo for some options
 
-First option:
-Put the Python script onto the designated USB. This script is loaded into RAM, so that once armed, if the designated USB containing the script is pulled out, then the killswitches can still activate.
-
-Second option:
-Put the Python script anywhere you want. It will detect any type of change, whether it be storage, periphals, etc, and trigger the killswitches. This is useful if a mouse jiggler is inserted to keep the computer awake.
+Put the Python script anywhere you want. It will detect any type of change, whether it be storage, periphals, etc, and trigger the killswitch. This is useful if a mouse jiggler is inserted to keep the computer awake, etc.
 ## Features
-
 
 - Dismount VeraCrypt volumes
 - End specified processes
@@ -27,10 +20,9 @@ Put the Python script anywhere you want. It will detect any type of change, whet
 - Turn off screen
 - Lock OS
 - Shutdown
-- Execute custom commands such as `python3 something.py` or any command that can be run on Windows
-- Trigger killswitch on specified USB pull
+- Execute custom commands such as `python3 something.py` or any command that can be run on Linux
 - Trigger killswitch on any device change
-- Button must be pressed 5 times to disarm any killswitch, to avoid accidental presses.
+- Button must be pressed 5 times to disarm any killswitch, to avoid accidental or forced presses.
 - Log for viewing changes.
 ## Notes
 
